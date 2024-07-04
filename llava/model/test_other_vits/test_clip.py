@@ -1,8 +1,11 @@
 import torch
 import torch.nn as nn
-
+import os
+from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from types import SimpleNamespace
 
+from torchvision.transforms import ToTensor, Resize, Compose
 
 class CLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
@@ -16,18 +19,12 @@ class CLIPVisionTower(nn.Module):
 
         if not delay_load:
             self.load_model()
-        elif getattr(args, 'unfreeze_mm_vision_tower', False):
-            self.load_model()
         else:
             self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
 
-    def load_model(self, device_map=None):
-        if self.is_loaded:
-            print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
-            return
-
+    def load_model(self):
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name)
         self.vision_tower.requires_grad_(False)
 
         self.is_loaded = True
@@ -80,9 +77,51 @@ class CLIPVisionTower(nn.Module):
         return self.config.hidden_size
 
     @property
-    def num_patches_per_side(self):
-        return self.config.image_size // self.config.patch_size
-
-    @property
     def num_patches(self):
         return (self.config.image_size // self.config.patch_size) ** 2
+    
+
+
+def build_vision_tower(vision_tower_cfg, **kwargs):
+    vision_tower = getattr(vision_tower_cfg, 'mm_vision_tower', getattr(vision_tower_cfg, 'vision_tower', None))
+    is_absolute_path_exists = os.path.exists(vision_tower)
+    if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion"):
+        return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+
+    raise ValueError(f'Unknown vision tower: {vision_tower}')
+
+
+# Define the configuration
+vision_tower_cfg = SimpleNamespace(
+    mm_vision_select_layer=-2,
+    mm_vision_select_feature="patch",
+    mm_vision_tower="openai/clip-vit-large-patch14-336"
+)
+
+vision_tower = build_vision_tower(vision_tower_cfg)
+# print(vision_tower)
+
+
+print("*"*50)
+image1 = Image.open("img1.jpg").convert("RGB")
+image2 = Image.open("img1.jpg").convert("RGB")
+
+
+transform = Compose([
+    Resize((336, 336)),
+    ToTensor()
+])
+
+image1 = transform(image1)
+image2 = transform(image2)
+
+images = [image1, image2]
+
+with torch.no_grad():
+    outputs = vision_tower(images)
+
+
+for out in outputs:
+    print(out.shape)
+
+print("DONE")

@@ -1,3 +1,5 @@
+# Modified from LLaVA: https://github.com/haotian-liu/LLaVA.git
+#
 #    Copyright 2023 Haotian Liu
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +23,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAn
 import torch
 from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.train.train import smart_tokenizer_and_embedding_resize
 
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
@@ -40,7 +43,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             bnb_4bit_quant_type='nf4'
         )
     else:
-        kwargs['torch_dtype'] = torch.float16
+        kwargs['torch_dtype'] = torch.float32 ###### MODIFIED
 
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
@@ -53,8 +56,19 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             from llava.model.language_model.llava_llama import LlavaConfig
             lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
+
             print('Loading LLaVA from base model...')
+            lora_cfg_pretrained.pad_token_id = None
+            lora_cfg_pretrained.vocab_size = lora_cfg_pretrained.vocab_size - 1
+
             model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+            print(f"Adding pad token as '<pad>'")
+            smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token="<pad>"),
+                tokenizer=tokenizer,
+                model=model,
+            )
+
             token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
             if model.lm_head.weight.shape[0] != token_num:
                 model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
@@ -159,9 +173,35 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             vision_tower.to(device=device_map, dtype=torch.float16)
         image_processor = vision_tower.image_processor
 
+
+    if 'llama3' in model_name.lower() or 'uni' in model_name.lower():
+        mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+        mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
+        if mm_use_im_patch_token:
+            tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
+        if mm_use_im_start_end:
+            tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+        model.resize_token_embeddings(len(tokenizer))
+
+        vision_tower = model.get_vision_tower()
+
+        print(f"Adding pad token as '<pad>'")
+        smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token="<pad>"),
+                tokenizer=tokenizer,
+                model=model,
+            )
+
+        print("LOADING MODEL...")
+        vision_tower.load_model(device_map=device_map)
+        vision_tower.to("cuda")
+        # if device_map != 'auto':
+        #     vision_tower.to(device=device_map, dtype=torch.float16)
+        image_processor = vision_tower.image_processor
+
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
     else:
         context_len = 2048
 
-    return tokenizer, model, image_processor, context_len
+    return tokenizer, model, image_processor, context_len, vision_tower

@@ -33,9 +33,8 @@ class LlavaMetaModel:
 
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
-            self.mm_projector = build_vision_projector(config,mm_hidden_size=512)
-            self.mm_projector3D = build_vision_projector(config,mm_hidden_size=512) # FIXME
-            #print("should work")
+            self.mm_projector = build_vision_projector(config)
+
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
                 self.image_newline = nn.Parameter(
                     torch.empty(config.hidden_size, dtype=self.dtype)
@@ -79,7 +78,6 @@ class LlavaMetaModel:
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
-            self.mm_projector3D = build_vision_projector(self.config,mm_hidden_size=512) # FIXME
 
             if 'unpad' in mm_patch_merge_type:
                 embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
@@ -88,20 +86,15 @@ class LlavaMetaModel:
                 )
         else:
             # In case it is frozen by LoRA
-            for p in self.mm_projector.parameters(): # FIXME
-                p.requires_grad = True 
+            for p in self.mm_projector.parameters():
+                p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
-            def get_w(weights, keyword, anti_keyword="None"):
-                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k and anti_keyword not in k}
+            def get_w(weights, keyword):
+                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
-            msg = self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector', 'mm_projector3D'))
-            print(f"Loaded mm_projector state_dict: {msg}")
-            assert self.mm_projector3D
-            if self.mm_projector3D:
-                msg = self.mm_projector3D.load_state_dict(get_w(mm_projector_weights, 'mm_projector3D'))
-                print(f"Loaded mm_projector3D state_dict: {msg}")
+            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
 
 def unpad_image(tensor, original_size):
@@ -144,52 +137,13 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, image_features, same_adapter=False,hybrid=True):
-        #image_features = self.get_model().get_vision_tower()(images)
-        #print(f"{image_features.shape=}")
-        #print(image_features.shape)
-        #print(f"{type(image_features)=}")
-        #assert isinstance(image_features, list), type(image_features)
-        if isinstance(image_features, list):
-            feats = []
-            if same_adapter:
-                for img_feats in image_features:
-                #print(f"{img_feats.shape=}")
-                    if img_feats.shape[1] == 197:
-                        feats.append(self.get_model().mm_projector(img_feats)) # .squeeze(1)
-                    else:
-                        feats.append(self.get_model().mm_projector(img_feats.flatten(0,2).unsqueeze(0)))
-                image_features = torch.concat(feats)
-            elif hybrid:
-                #print([f.shape for f in image_features])
-                assert len(image_features)==2, len(image_features)
-                for img_feats in image_features:
-                    #print(f"{img_feats.shape=}")
-                    if img_feats.shape[1] == 16 and img_feats.shape[2]==16:
-                        #print(img_feats.shape)
-                        feats.append(self.get_model().mm_projector3D(img_feats.flatten(0,2).unsqueeze(0))) # .squeeze(1)
-                    else:
-                        #print(img_feats.shape)
-                        feats.append(self.get_model().mm_projector(img_feats.unsqueeze(0)))
-                    image_features = torch.concat(feats,dim=1)
-                #print(image_features.shape)
-                #exit()
-            else:
-                for img_feats in image_features:
-                    #print(f"{img_feats.shape=}")
-                    if img_feats.shape[1] == 197:
-                        feats.append(self.get_model().mm_projector(img_feats)) # .squeeze(1)
-                    else:
-                        feats.append(self.get_model().mm_projector3D(img_feats.flatten(0,2).unsqueeze(0)))
-                image_features = torch.concat(feats)
-        else:
-            #if image_features.shape[2] == 197:
-                #print(f"{image_features.squeeze(1).shape=} using 2D projector")
-            image_features = self.get_model().mm_projector(image_features.squeeze(1))
-            #else:
-                #print(f"{image_features.flatten(1,3).shape=} using 3D projector")
-                #image_features = self.get_model().mm_projector3D(image_features.flatten(1,3))
-        #print(f"{image_features.shape=}")
+    def encode_images(self, images):
+        image_features = self.get_model().get_vision_tower()(images) # TODO: THIS WAS CHANGED
+        image_features = self.get_model().mm_projector(image_features) # TODO: THIS WAS CHANGED
+        return image_features
+    
+    def encode_image_feats(self, image_feats):
+        image_features = self.get_model().mm_projector(image_feats)# TODO: THIS LINE IS NEW
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
@@ -197,11 +151,12 @@ class LlavaMetaForCausalLM(ABC):
         images, image_sizes=None
     ):
         vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None: # or input_ids.shape[1] == 1
+        if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
-        #print(f"{len(images)=}")
-        # assert type(images) not is list, f"its a list"
-        #assert not isinstance(images, list), "Its a list"
+        
+        print("images are of type: ", type(images))
+        # print(images[0].shape)
+
         # if type(images) is list or images.ndim == 5:
         #     if type(images) is list:
         #         images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
@@ -251,11 +206,11 @@ class LlavaMetaForCausalLM(ABC):
         #     else:
         #         raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         # else:
-        #if not isinstance(images, list):
-        #    images = torch.cat([images], dim=0)
-        image_features = self.encode_images(images)
+        #    image_features = self.encode_images(images)
 
-            #image_features = images
+        image_features = torch.cat([img for img in images], dim=0)
+        image_features = self.encode_image_feats(image_features)
+        print("image_features: ", image_features.shape)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -286,12 +241,11 @@ class LlavaMetaForCausalLM(ABC):
         new_labels = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            #print(f"{IMAGE_TOKEN_INDEX=}")
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)  # what is this?????
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
@@ -309,8 +263,8 @@ class LlavaMetaForCausalLM(ABC):
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
-            #print(f"{num_images=}")
-            for i in range(num_images+1):      
+
+            for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
@@ -321,8 +275,12 @@ class LlavaMetaForCausalLM(ABC):
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
             
+            print(cur_new_input_embeds)
+            for x in cur_new_input_embeds:
+                print(x.shape)
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
-
+            print(cur_new_input_embeds.shape)
+            exit()
             cur_new_labels = torch.cat(cur_new_labels)
 
             new_input_embeds.append(cur_new_input_embeds)

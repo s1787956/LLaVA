@@ -1,5 +1,6 @@
 import argparse
 import torch
+import timm
 
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
@@ -108,12 +109,20 @@ def main(args):
         streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
 
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        tile_encoder = timm.create_model("hf_hub:prov-gigapath/prov-gigapath", pretrained=True).to(device)
+        tile_encoder.eval()
 
         with torch.inference_mode():
-            images_encoded = vision_tower(image_tensor)
+
+            image_tensor = image_tensor.to(torch.float32)
+
+            image_encoded = tile_encoder.forward_features(image_tensor.to(device))
+            image_encoded = image_encoded[..., :1024]
             output_ids = model.generate(
                 input_ids,
-                images=images_encoded,
+                images=image_encoded,
                 image_sizes=image_sizes,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,

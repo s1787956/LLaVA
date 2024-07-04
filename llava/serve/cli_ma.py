@@ -16,15 +16,18 @@ from PIL import Image
 from io import BytesIO
 from transformers import TextStreamer
 
+import h5py
+# def load_image(image_file):
+#     if image_file.startswith('http://') or image_file.startswith('https://'):
+#         response = requests.get(image_file)
+#         image = Image.open(BytesIO(response.content)).convert('RGB')
+#     else:
+#         image = Image.open(image_file).convert('RGB')
+#     return image
 
-def load_image(image_file):
-    if image_file.startswith('http://') or image_file.startswith('https://'):
-        response = requests.get(image_file)
-        image = Image.open(BytesIO(response.content)).convert('RGB')
-    else:
-        image = Image.open(image_file).convert('RGB')
-    return image
-
+def load_feats(feat_file):
+    feats = np.array(h5py.File(image_file)["feats"][:])
+    return torch.from_numpy(feats)
 
 def main(args):
     # Model
@@ -57,26 +60,26 @@ def main(args):
     else:
         roles = conv.roles
 
-    if args.image_file:
-        image = load_image(args.image_file)
-        image_sizes = [image.size]
-        # Similar operation in model_worker.py
-        image_tensor = process_images([image], image_processor, model.config)
-        if type(image_tensor) is list:
-            image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
-        else:
-            image_tensor = image_tensor.to(model.device, dtype=torch.float16)
+    # if args.image_file:
+    #     image = load_image(args.image_file)
+    #     image_sizes = [image.size]
+    #     # Similar operation in model_worker.py
+    #     image_tensor = process_images([image], image_processor, model.config)
+    #     if type(image_tensor) is list:
+    #         image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
+    #     else:
+    #         image_tensor = image_tensor.to(model.device, dtype=torch.float16)
 
 
-    if args.image_path:
-        image_list = np.random.permutation(list(Path(args.image_path).glob("*.jpg"))).tolist()
-        image_list = image_list[: 128]
-        image_list = [str(p) for p in image_list]
-        images = [load_image(image) for image in image_list]
-        image_sizes = [img.size for img in images]
-        image_tensor = process_images(images, image_processor, model.config)
-        image_tensor = image_tensor.to(model.device, dtype=torch.float16)
-        image = images[0]
+    # if args.image_path:
+    #     image_list = np.random.permutation(list(Path(args.image_path).glob("*.jpg"))).tolist()
+    #     image_list = image_list[: 128]
+    #     image_list = [str(p) for p in image_list]
+    #     images = [load_image(image) for image in image_list]
+    #     image_sizes = [img.size for img in images]
+    #     image_tensor = process_images(images, image_processor, model.config)
+    #     image_tensor = image_tensor.to(model.device, dtype=torch.float16)
+    #     image = images[0]
 
 
     while True:
@@ -90,13 +93,13 @@ def main(args):
 
         print(f"{roles[1]}: ", end="")
         
-        if image is not None:
-            # first message
-            if model.config.mm_use_im_start_end:
-                inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
-            else:
-                inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
-            image = None
+        #if image is not None:
+        # first message
+        if model.config.mm_use_im_start_end:
+            inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
+        else:
+            inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
+        image = None
         
         conv.append_message(conv.roles[0], inp)
         conv.append_message(conv.roles[1], None)
@@ -110,7 +113,7 @@ def main(args):
 
 
         with torch.inference_mode():
-            images_encoded = vision_tower(image_tensor)
+            images_encoded = load_feats(feat_file).to(device)
             output_ids = model.generate(
                 input_ids,
                 images=images_encoded,
@@ -132,7 +135,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--image-file", type=str, required=False)
+    parser.add_argument("--feat-file", type=str, required=False)
     parser.add_argument("--image-path", type=str, required=False)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--conv-mode", type=str, default=None)

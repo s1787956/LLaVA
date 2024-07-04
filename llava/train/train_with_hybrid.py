@@ -843,23 +843,25 @@ class LazySupervisedDataset(Dataset):
 class LazySupervisedFeatDataset(Dataset):
     """Dataset for supervised fine-tuning with features."""
 
-    def __init__(self, data_path: str,
+    def __init__(self, data_path_2D, data_path_3D: str,
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedFeatDataset, self).__init__()
-        list_data_dict = json.load(open(data_path, "r"))
+        list_data_dict_3D = json.load(open(data_path_3D, "r"))
+        list_data_dict_2D = json.load(open(data_path_2D, "r"))
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
-        self.list_data_dict = list_data_dict
+        self.list_data_dict_2D = list_data_dict_2D
+        self.list_data_dict_3D = list_data_dict_3D
         self.data_args = data_args
 
     def __len__(self):
-        return len(self.list_data_dict)
+        return len(self.list_data_dict_2D)
 
     @property
     def lengths(self):
         length_list = []
-        for sample in self.list_data_dict:
+        for sample in self.list_data_dict_2D:
             img_tokens = 128 if 'image' in sample else 0
             length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
         return length_list
@@ -867,50 +869,60 @@ class LazySupervisedFeatDataset(Dataset):
     @property
     def modality_lengths(self):
         length_list = []
-        for sample in self.list_data_dict:
+        for sample in self.list_data_dict_2D:
             cur_len = sum(len(conv['value'].split()) for conv in sample['conversations'])
             cur_len = cur_len if 'image' in sample else -cur_len
             length_list.append(cur_len)
         return length_list
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        sources = self.list_data_dict[i]
-        if isinstance(i, int):
-            sources = [sources]
-        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
-        if 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            #image_file = image_file.replace('.nii.gz', '.h5')
-            image_folder = self.data_args.image_folder
-            with h5py.File(f'{image_folder}/{image_file}', "r") as f:
-                image = torch.tensor(f["feats"][:])
-                if image.ndim == 1:
-                    image.unsqueeze_(0)
-            try:
-                sources = preprocess_multimodal(
-                    copy.deepcopy([e["conversations"] for e in sources]),
-                    self.data_args
-                )
-            except Exception as exc:
-                print(f"Problem with {sources}: {exc}!")
-        else:
-            sources = copy.deepcopy([e["conversations"] for e in sources])
-        data_dict = preprocess(
-            sources,
-            self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
-        if isinstance(i, int):
-            data_dict = dict(input_ids=data_dict["input_ids"][0],
-                             labels=data_dict["labels"][0])
+        sources = self.list_data_dict_2D[i]
+        sources3D = self.list_data_dict_3D[i]
+        assert sources3D["image"] in sources["image"], f"{sources['image']} does not match {sources3D['image']}!"
 
-        # image exist in the data
-        if 'image' in self.list_data_dict[i]:
-            data_dict['image'] = image
-        elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
-            crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
-        return data_dict
+        if isinstance(i, int):
+            sources = [sources,sources3D]
+        #assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        data_dicts = []
+        for source in sources:
+            if 'image' in source:
+                image_file = source['image']
+                #image_file = image_file.replace('.nii.gz', '.h5')
+                image_folder = self.data_args.image_folder
+                #print(f"{image_folder}/{image_file}")
+                with h5py.File(f'{image_folder}/{image_file}', "r") as f:
+                    image = torch.tensor(f["feats"][:])
+                    if image.ndim == 1:
+                        image.unsqueeze_(0)
+                try:
+                    proc_source = preprocess_multimodal(
+                        copy.deepcopy([source["conversations"]]),
+                        self.data_args
+                    )
+                except Exception as exc:
+                    print(f"Problem with {source}: {exc}!")
+            else:
+                proc_source = copy.deepcopy([source["conversations"]])
+            #print(proc_source)
+            data_dict = preprocess(
+                proc_source, # this was changed to [0] for finetuning for unclear reasons! FIXME!
+                self.tokenizer,
+                has_image=('image' in source))
+            if isinstance(i, int):
+                data_dict = dict(input_ids=data_dict["input_ids"][0],
+                                labels=data_dict["labels"][0])
+
+            # image exist in the data
+            if 'image' in source:
+                data_dict['image'] = image
+            elif self.data_args.is_multimodal:
+                # image does not exist in the data, but the model is multimodal
+                crop_size = self.data_args.image_processor.crop_size
+                data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dicts.append(data_dict)
+        assert len(data_dicts)==2, f"Something went wrong: {[dd.keys() for dd in data_dicts]}"
+        #print([dd['image'].shape for dd in data_dicts])
+        return data_dicts
 
 @dataclass
 class DataCollatorForSupervisedDataset(object):
@@ -919,7 +931,13 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels = tuple([instance[key] for instance in instances]
+        #if any([len(instance) for instance in instances])>1:
+        #    instances = [inst for instance in instances for inst in instance]
+        #else:
+        #instances = [instance[0] for instance in instances]
+        instances = [instance for instance in instances[0]] 
+
+        input_ids, labels = tuple([instances[0][key]]  # why are you reducting yourself to their level??
                                   for key in ("input_ids", "labels"))
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids,

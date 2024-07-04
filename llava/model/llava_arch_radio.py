@@ -148,8 +148,8 @@ class LlavaMetaForCausalLM(ABC):
         #image_features = self.get_model().get_vision_tower()(images)
         #print(f"{image_features.shape=}")
         #print(image_features.shape)
-        #print(f"{type(image_features)=}")
-        #assert isinstance(image_features, list), type(image_features)
+        print(f"{type(image_features)=}")
+        assert isinstance(image_features, list), type(image_features)
         if isinstance(image_features, list):
             feats = []
             if same_adapter:
@@ -183,12 +183,12 @@ class LlavaMetaForCausalLM(ABC):
                         feats.append(self.get_model().mm_projector3D(img_feats.flatten(0,2).unsqueeze(0)))
                 image_features = torch.concat(feats)
         else:
-            #if image_features.shape[2] == 197:
+            if image_features.shape[2] == 197:
                 #print(f"{image_features.squeeze(1).shape=} using 2D projector")
-            image_features = self.get_model().mm_projector(image_features.squeeze(1))
-            #else:
+                image_features = self.get_model().mm_projector(image_features.squeeze(1))
+            else:
                 #print(f"{image_features.flatten(1,3).shape=} using 3D projector")
-                #image_features = self.get_model().mm_projector3D(image_features.flatten(1,3))
+                image_features = self.get_model().mm_projector3D(image_features.flatten(1,3))
         #print(f"{image_features.shape=}")
         return image_features
 
@@ -197,7 +197,7 @@ class LlavaMetaForCausalLM(ABC):
         images, image_sizes=None
     ):
         vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None: # or input_ids.shape[1] == 1
+        if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
         #print(f"{len(images)=}")
         # assert type(images) not is list, f"its a list"
@@ -251,8 +251,8 @@ class LlavaMetaForCausalLM(ABC):
         #     else:
         #         raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         # else:
-        #if not isinstance(images, list):
-        #    images = torch.cat([images], dim=0)
+        if not isinstance(images, list):
+            images = torch.cat([images], dim=0)
         image_features = self.encode_images(images)
 
             #image_features = images
